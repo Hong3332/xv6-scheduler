@@ -20,3 +20,9 @@
 #define SYS_link   19
 #define SYS_mkdir  20
 #define SYS_close  21
+#define SYS_set_sched 22
+#define SYS_set_priority  23
+#define SYS_top 24
+#define SYS_fork_with_priority 25
+#define SYS_yield 26
+#define SYS_get_waiting_time  27

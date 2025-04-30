@@ -139,6 +139,13 @@ UPROGS=\
 	$U/_grind\
 	$U/_wc\
 	$U/_zombie\
+	$U/_setpolicy\
+        $U/_test_mlfq\
+        $U/_top\
+        $U/_test_fcfs\
+	$U/_test\
+        $U/_test_ps\
+	$U/_test_hrrn\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

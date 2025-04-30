@@ -104,4 +104,27 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  int arrival_time;
+  int priority;
+  int last_runtime;
+  int runtime_start_ticks;
+  int queue_level;         
+  int time_slice;
+  int total_ticks;
+  int ready_time;
+  int run_start_time;
+  int waiting_time;
+
 };
+
+
+#define QUEUE_LEVELS 3
+
+struct mlfq_t {
+  struct spinlock lock;
+  struct proc *queue[QUEUE_LEVELS][NPROC];
+  int qsize[QUEUE_LEVELS];
+};
+
+extern struct mlfq_t mlfq;  
+

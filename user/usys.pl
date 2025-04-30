@@ -36,3 +36,8 @@ entry("getpid");
 entry("sbrk");
 entry("sleep");
 entry("uptime");
+entry("set_sched");
+entry("set_priority");
+entry("top");
+entry("fork_with_priority");
+entry("yield");

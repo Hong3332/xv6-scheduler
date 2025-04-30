@@ -22,6 +22,12 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+int set_sched(int mode);
+int set_priority(int pid, int prio);
+int top(void);
+int fork_with_priority(int priority);
+int get_waiting_time(int pid);
+
 
 // ulib.c
 int stat(const char*, struct stat*);
@@ -37,6 +43,7 @@ void* memset(void*, int, uint);
 int atoi(const char*);
 int memcmp(const void *, const void *, uint);
 void *memcpy(void *, const void *, uint);
+
 
 // umalloc.c
 void* malloc(uint);

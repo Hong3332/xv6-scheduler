@@ -6,6 +6,9 @@
 #include "proc.h"
 #include "defs.h"
 
+
+struct mlfq_t mlfq;
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -26,6 +29,18 @@ extern char trampoline[]; // trampoline.S
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
 
+
+enum sched_policy {
+  SCHED_RR = 0,
+  SCHED_FCFS = 1,
+  SCHED_PRIORITY = 2,
+  SCHED_HRRN = 3,
+  SCHED_MLFQ = 4
+};
+
+int current_policy = SCHED_RR;
+
+
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
 // guard page.
@@ -43,6 +58,17 @@ proc_mapstacks(pagetable_t kpgtbl)
   }
 }
 
+void
+mlfq_init() {
+  initlock(&mlfq.lock, "mlfq");
+  for (int i = 0; i < QUEUE_LEVELS; i++) {
+    mlfq.qsize[i] = 0;
+    for (int j = 0; j < NPROC; j++) {
+      mlfq.queue[i][j] = 0;
+    }
+  }
+}
+
 // initialize the proc table.
 void
 procinit(void)
@@ -56,6 +82,7 @@ procinit(void)
       p->state = UNUSED;
       p->kstack = KSTACK((int) (p - proc));
   }
+  mlfq_init();
 }
 
 // Must be called with interrupts disabled,
@@ -146,6 +173,15 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  
+  p->arrival_time = ticks;
+  p->priority = 10;
+  p->last_runtime = 1;
+  p->queue_level = 0;
+  p->time_slice = 0;
+  p->total_ticks = 0;
+  safestrcpy(p->name, "unknown", sizeof(p->name));
+
   return p;
 }
 
@@ -228,6 +264,33 @@ uchar initcode[] = {
   0x00, 0x00, 0x00, 0x00
 };
 
+void
+enqueue_to_mlfq(struct proc *p) {
+  int level = p->queue_level;
+
+  
+  for (int i = 0; i < mlfq.qsize[level]; i++) {
+    if (mlfq.queue[level][i] == p) {
+      
+      for (int j = i; j < mlfq.qsize[level] - 1; j++) {
+        mlfq.queue[level][j] = mlfq.queue[level][j+1];
+      }
+      mlfq.qsize[level]--;
+      break;
+    }
+  }
+
+  
+  if (mlfq.qsize[level] < NPROC) {
+    mlfq.queue[level][mlfq.qsize[level]++] = p;
+  } else {
+    panic("MLFQ: queue full");
+  }
+}
+
+
+
+
 // Set up first user process.
 void
 userinit(void)
@@ -249,7 +312,22 @@ userinit(void)
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
+  p->arrival_time = ticks;
+  p->priority = 10;
+  p->last_runtime = 1;
+  p->queue_level = 0;
+  p->time_slice = 0;
+  p->total_ticks = 0;
+  
   p->state = RUNNABLE;
+  p->ready_time = ticks;
+
+  if (current_policy == 4) {
+    acquire(&mlfq.lock);
+    enqueue_to_mlfq(p);
+    release(&mlfq.lock);
+  }
+
 
   release(&p->lock);
 }
@@ -274,6 +352,7 @@ growproc(int n)
   return 0;
 }
 
+
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
 int
@@ -296,13 +375,78 @@ fork(void)
   }
   np->sz = p->sz;
 
-  // copy saved user registers.
+  // Copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
 
-  // increment reference counts on open file descriptors.
+  // Copy file descriptors.
+  for(i = 0; i < NOFILE; i++)
+    if(p->ofile[i])
+      np->ofile[i] = filedup(p->ofile[i]);
+
+  np->cwd = idup(p->cwd);
+
+  safestrcpy(np->name, p->name, sizeof(np->name));
+
+  pid = np->pid;
+
+  release(&np->lock);
+
+  acquire(&wait_lock);
+  np->parent = p;
+  release(&wait_lock);
+
+  acquire(&np->lock);
+
+
+  np->priority = 10;
+  np->last_runtime = 1;
+  np->queue_level = 0;
+  np->time_slice = 0;
+  np->total_ticks = 0;
+
+
+  np->state = RUNNABLE;
+  np->ready_time = ticks;
+
+  if (current_policy == 4) {
+    acquire(&mlfq.lock);
+    enqueue_to_mlfq(np);
+    release(&mlfq.lock);
+  }
+
+  release(&np->lock);
+
+  return pid;
+}
+
+int
+fork_with_priority(int priority)
+{
+  int i, pid;
+  struct proc *np;
+  struct proc *p = myproc();
+
+  // Allocate process.
+  if((np = allocproc()) == 0){
+    return -1;
+  }
+
+  // Copy user memory.
+  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
+  np->sz = p->sz;
+
+  // Copy trapframe.
+  *(np->trapframe) = *(p->trapframe);
+  np->trapframe->a0 = 0;  // Child returns 0 from fork.
+
+  // Copy open files.
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
@@ -319,11 +463,26 @@ fork(void)
   release(&wait_lock);
 
   acquire(&np->lock);
+
+  np->priority = priority; 
+  np->last_runtime = 1;
+  np->queue_level = 0;
+  np->time_slice = 0;
+  np->total_ticks = 0;
+
   np->state = RUNNABLE;
+
+  if (current_policy == SCHED_MLFQ) {
+    acquire(&mlfq.lock);
+    enqueue_to_mlfq(np);
+    release(&mlfq.lock);
+  }
+
   release(&np->lock);
 
   return pid;
 }
+
 
 // Pass p's abandoned children to init.
 // Caller must hold wait_lock.
@@ -434,6 +593,16 @@ wait(uint64 addr)
   }
 }
 
+void
+compact_queue(int level) {
+  int j = 0;
+  for (int i = 0; i < mlfq.qsize[level]; i++) {
+    if (mlfq.queue[level][i] != 0)
+      mlfq.queue[level][j++] = mlfq.queue[level][i];
+  }
+  mlfq.qsize[level] = j;
+}
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -446,39 +615,207 @@ scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
-
   c->proc = 0;
+
   for(;;){
-    // The most recent process to run may have had interrupts
-    // turned off; enable them to avoid a deadlock if all
-    // processes are waiting.
     intr_on();
 
-    int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+    if (current_policy == 1) {
+      struct proc *chosen = 0;
+      uint min_arrival = -1;
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+      for (p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if (p->state == RUNNABLE) {
+          if (p->arrival_time < min_arrival) {
+            if (chosen) {
+              release(&chosen->lock);
+            }
+            chosen = p;
+            min_arrival = p->arrival_time;
+          } else {
+            release(&p->lock);
+          }
+        } else {
+          release(&p->lock);
+        }
       }
-      release(&p->lock);
-    }
-    if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
-      intr_on();
-      asm volatile("wfi");
+
+      if (chosen) {
+        chosen->run_start_time = ticks;
+        chosen->waiting_time = chosen->run_start_time - chosen->ready_time;
+        
+        
+        chosen->state = RUNNING;
+        c->proc = chosen;
+        swtch(&c->context, &chosen->context);
+        c->proc = 0;
+        release(&chosen->lock);
+      } else {
+        intr_on();
+        asm volatile("wfi");
+      }
+    } else if (current_policy == 2) {
+      // === Priority Scheduling ===
+      struct proc *chosen = 0;
+      for(p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if(p->state == RUNNABLE) {
+          if (chosen == 0 || p->priority < chosen->priority) {
+            if (chosen) release(&chosen->lock);
+            chosen = p;
+          } else {
+            release(&p->lock);
+          }
+        } else {
+          release(&p->lock);
+        }
+      }
+      
+      if (chosen) {
+        chosen->run_start_time = ticks;
+        chosen->waiting_time = chosen->run_start_time - chosen->ready_time;
+        
+        chosen->state = RUNNING;
+        c->proc = chosen;
+        swtch(&c->context, &chosen->context);
+        c->proc = 0;
+        release(&chosen->lock);
+      } else {
+        intr_on();
+        asm volatile("wfi");
+      }
+    } else if (current_policy == 3) {
+        // === HRRN Scheduling ===
+
+            struct proc *chosen = 0;
+            int chosen_rr_num = -1; // numerator of response ratio
+            int chosen_rr_den = 1;  // denominator of response ratio
+
+            for(p = proc; p < &proc[NPROC]; p++) {
+              acquire(&p->lock);
+              if(p->state == RUNNABLE) {
+                int wait_time = ticks - p->arrival_time;
+                int service_time = p->last_runtime > 0 ? p->last_runtime : 1;
+
+                int rr_num = wait_time + service_time;
+                int rr_den = service_time;
+
+                // Compare: rr_num/rr_den > chosen_rr_num/chosen_rr_den
+                if (chosen == 0 || rr_num * chosen_rr_den > chosen_rr_num * rr_den) {
+                  if (chosen) release(&chosen->lock);
+                  chosen = p;
+                  chosen_rr_num = rr_num;
+                  chosen_rr_den = rr_den;
+                } else {
+                  release(&p->lock);
+                }
+              } else {
+                release(&p->lock);
+              }
+            }
+
+            if (chosen) {
+              chosen->run_start_time = ticks;
+              chosen->waiting_time = chosen->run_start_time - chosen->ready_time;
+              
+              chosen->runtime_start_ticks = ticks;
+              chosen->state = RUNNING;
+              c->proc = chosen;
+              swtch(&c->context, &chosen->context);
+              c->proc = 0;
+
+              
+              int delta = ticks - chosen->runtime_start_ticks;
+              chosen->last_runtime = delta > 0 ? delta : 1;
+              release(&chosen->lock);
+            } else {
+              intr_on();
+              asm volatile("wfi");
+            }
+
+    } else if (current_policy == 4) {
+      int found = 0;
+
+
+      int total_qsize = 0;
+      for (int i = 0; i < QUEUE_LEVELS; i++)
+        total_qsize += mlfq.qsize[i];
+
+      if (total_qsize == 0) {
+        acquire(&mlfq.lock);
+        for (struct proc *q = proc; q < &proc[NPROC]; q++) {
+          if (q->state == RUNNABLE) {
+            enqueue_to_mlfq(q);  // 保留原 queue_level
+            q->time_slice = 0;
+          }
+        }
+        release(&mlfq.lock);
+      }
+
+
+
+      
+      for (int level = 0; level < QUEUE_LEVELS; level++) {
+        for (int i = 0; i < mlfq.qsize[level]; i++) {
+          p = mlfq.queue[level][i];
+          if (p == 0) continue;
+
+          acquire(&p->lock);
+          if (p->state == RUNNABLE) {
+            p->run_start_time = ticks;
+            p->waiting_time = p->run_start_time - p->ready_time;
+            
+            p->state = RUNNING;
+            c->proc = p;
+
+            mlfq.queue[level][i] = 0;
+            compact_queue(level);
+
+            swtch(&c->context, &p->context);
+            c->proc = 0;
+
+            release(&p->lock); 
+            found = 1;
+            goto done;
+          }
+          release(&p->lock);
+
+        }
+      }
+
+    done:
+      if (!found) {
+        intr_on();
+        asm volatile("wfi");
+      }
+    
+
+    }else {
+      // === Round-Robin ===
+      int found = 0;
+      for(p = proc; p < &proc[NPROC]; p++) {
+        acquire(&p->lock);
+        if(p->state == RUNNABLE) {
+          p->run_start_time = ticks;
+          p->waiting_time = p->run_start_time - p->ready_time;
+          
+          p->state = RUNNING;
+          c->proc = p;
+          swtch(&c->context, &p->context);
+          c->proc = 0;
+          found = 1;
+        }
+        release(&p->lock);
+      }
+      if(found == 0) {
+        intr_on();
+        asm volatile("wfi");
+      }
     }
   }
 }
+
 
 // Switch to scheduler.  Must hold only p->lock
 // and have changed proc->state. Saves and restores
@@ -513,10 +850,23 @@ yield(void)
 {
   struct proc *p = myproc();
   acquire(&p->lock);
+
+  int delta = ticks - p->runtime_start_ticks;
+  p->last_runtime = delta > 0 ? delta : 1;
+
   p->state = RUNNABLE;
+
+  if (current_policy == SCHED_MLFQ) {
+    acquire(&mlfq.lock);
+    enqueue_to_mlfq(p);
+    release(&mlfq.lock);
+  }
+
   sched();
   release(&p->lock);
 }
+
+
 
 // A fork child's very first scheduling by scheduler()
 // will swtch to forkret.
@@ -526,7 +876,8 @@ forkret(void)
   static int first = 1;
 
   // Still holding p->lock from scheduler.
-  release(&myproc()->lock);
+  struct proc *p = myproc();
+  release(&p->lock);
 
   if (first) {
     // File system initialization must be run in the context of a
@@ -535,12 +886,15 @@ forkret(void)
     fsinit(ROOTDEV);
 
     first = 0;
-    // ensure other cores see first=0.
-    __sync_synchronize();
+    __sync_synchronize(); // Ensure all cores see fsinit complete
   }
+
+
+  p->runtime_start_ticks = ticks;
 
   usertrapret();
 }
+
 
 // Atomically release lock and sleep on chan.
 // Reacquires lock when awakened.
@@ -585,6 +939,12 @@ wakeup(void *chan)
       acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
         p->state = RUNNABLE;
+        p->ready_time = ticks;
+        if (current_policy == SCHED_MLFQ) {
+          acquire(&mlfq.lock);
+          enqueue_to_mlfq(p);
+          release(&mlfq.lock);
+        }
       }
       release(&p->lock);
     }
@@ -692,4 +1052,21 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+
+int
+get_waiting_time(int pid)
+{
+  struct proc *p;
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->pid == pid) {
+      int w = p->waiting_time;
+      release(&p->lock);
+      return w;
+    }
+    release(&p->lock);
+  }
+  return -1;
 }
