@@ -46,7 +46,7 @@ int main() {
       int mypid = getpid();
       //int start = uptime();
 
-      // 模拟不同类型的任务
+      
       if (i % 4 == 0) {
         simulate_workload(50000000); // long task
       } else if (i % 4 == 1) {
@@ -64,7 +64,7 @@ int main() {
 
 
 
-      exit(waiting);  // 将 waiting time 返回给父进程
+      exit(waiting);
     } else if (pid > 0) {
       infos[i].pid = pid;
       infos[i].start_tick = uptime();
@@ -78,7 +78,7 @@ int main() {
 
   for (int i = 0; i < NPROCS; i++) {
     int status;
-    int pid = wait(&status);  // status 就是子进程返回的 waiting time
+    int pid = wait(&status);  
     int finish = uptime();
 
     for (int j = 0; j < NPROCS; j++) {

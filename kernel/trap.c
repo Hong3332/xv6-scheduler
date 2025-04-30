@@ -73,18 +73,18 @@ usertrap(void)
     }
 
     if (current_policy == 0 && p && p->state == RUNNING) {
-      // Round-Robin需要每个timer interrupt yield
+      
       yield();
     } else if (current_policy == 4 && p && p->state == RUNNING) {
-      // MLFQ需要根据time_slice判断
+      
       p->time_slice++;
-      int max_ticks[] = {5, 10, 20}; // MLFQ各层最大时间片
+      int max_ticks[] = {5, 10, 20};
 
       if (p->time_slice >= max_ticks[p->queue_level]) {
         if (p->queue_level < QUEUE_LEVELS - 1) {
           printf("PID=%d exceeded time slice at tick=%d, demoting from level %d to %d\n",
                  p->pid, ticks, p->queue_level, p->queue_level + 1);
-          p->queue_level++; // 降级
+          p->queue_level++;
         } else {
           printf("PID=%d reached time slice limit at tick=%d (already at lowest level %d)\n",
                  p->pid, ticks, p->queue_level);
@@ -94,7 +94,7 @@ usertrap(void)
       }
 
     }
-    // FCFS (1)、Priority (2)、HRRN (3) 这里不需要做yield
+    
   }
 
   usertrapret();

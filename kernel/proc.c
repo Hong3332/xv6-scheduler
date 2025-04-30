@@ -746,7 +746,7 @@ scheduler(void)
         acquire(&mlfq.lock);
         for (struct proc *q = proc; q < &proc[NPROC]; q++) {
           if (q->state == RUNNABLE) {
-            enqueue_to_mlfq(q);  // 保留原 queue_level
+            enqueue_to_mlfq(q);  
             q->time_slice = 0;
           }
         }
